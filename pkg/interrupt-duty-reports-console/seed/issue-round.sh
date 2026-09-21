@@ -25,6 +25,15 @@ set -e
 DIR=${1:?issue-round.sh needs the run directory}
 [ -f "$DIR/data.json" ] || { echo "issue-round.sh: no data.json in $DIR" >&2; exit 2; }
 
+# One item instead of all of them:  issue-round.sh <dir> --only SURE-1234
+#
+# For re-running the one that failed, and for testing a change to the prompt or the brief
+# without paying for a whole board. Without it the only way to exercise one item was to hand-
+# edit data.json, which is both fiddly and a good way to test something that is not the thing
+# that runs for real.
+ONLY=""
+[ "${2:-}" = "--only" ] && ONLY=${3:?--only needs an item reference}
+
 ROOT=$(dirname "$0")
 # The agent is a document reader now, not a resumed session - see issue-agent.mjs for why.
 AGENT="node $ROOT/issue-agent.mjs"
@@ -33,7 +42,7 @@ WORK="$DIR/issue-round"
 mkdir -p "$WORK"
 
 # One file per item: its data, its computed class, and the shape of the answer wanted back.
-ISSUE_AGENT_CMD="$AGENT" node -e '
+ISSUE_ONLY="$ONLY" ISSUE_AGENT_CMD="$AGENT" node -e '
 const fs = require("fs");
 const [dataPath, workDir, brief] = process.argv.slice(1);
 const d = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -100,7 +109,7 @@ const SEEN = (() => {
 })();
 
 function lastSeen(ref) {
-  return SEEN[ref] || null;
+  return (SEEN[ref] || {}).last_seen || null;
 }
 
 const items = [];
@@ -117,11 +126,25 @@ for (const [group, arr] of Object.entries(d.jira || {})) {
   }
 }
 
-fs.writeFileSync(`${ workDir }/items.json`, JSON.stringify(items));
+const only = process.env.ISSUE_ONLY;
+const chosen = only ? items.filter((i) => i.ref === only) : items;
+
+if (only && !chosen.length) {
+  process.stderr.write(`issue-round: --only ${ only } matched nothing; the board has: ${ items.map((i) => i.ref).join(", ") }\n`);
+  process.exit(2);
+}
+
+// How many rounds each agent has already failed in a row, carried across to the asking pass -
+// it runs as its own process and would otherwise have to go back to the cluster for it.
+for (const it of chosen) {
+  it.failures_before = (SEEN[it.ref] || {}).failures || 0;
+}
+
+fs.writeFileSync(`${ workDir }/items.json`, JSON.stringify(chosen));
 
 // The prompt each agent gets. Its own item and nothing else: an agent that could see the
 // whole board would start reporting on items that are not its own.
-for (const [n, it] of items.entries()) {
+for (const [n, it] of chosen.entries()) {
   const seen = lastSeen(it.ref);
   const i = it.item;
   const comments = Array.isArray(i.comments) ? i.comments : [];
@@ -178,7 +201,7 @@ for (const [n, it] of items.entries()) {
   fs.writeFileSync(`${ workDir }/${ String(n).padStart(3, "0") }.prompt`, lines.join("\n"));
 }
 
-process.stderr.write(`issue-round: ${ items.length } items\n`);
+process.stderr.write(`issue-round: ${ chosen.length } item${ chosen.length === 1 ? "" : "s" }${ only ? ` (--only ${ only })` : "" }\n`);
 ' "$DIR/data.json" "$WORK" "$ROOT/issue-brief.md"
 
 # Ask each one, in turn. A failure is recorded against that item rather than ending the round:
@@ -326,10 +349,18 @@ for (const [n, it] of items.entries()) {
     // abandoned browser pane could hold one indefinitely. A document has no such state: this
     // round and a person\u2019s chat can both append, in any order, and both are kept. A failure
     // here is now a real failure and reads as one.
+    // A run of failures is a fact about the item, and the reporter is told to call one out.
+    // Counted from the agent\u2019s own history rather than from this run, which only ever
+    // sees one.
+    const runOf = (it.failures_before || 0) + 1;
+
     out[it.ref] = {
       ...it,
-      ok:    false,
-      error: String(e.message || e).slice(0, 300),
+      ok:              false,
+      failed_in_a_row: runOf,
+      error: runOf > 1
+        ? `${ String(e.message || e).slice(0, 220) } (this agent has now failed ${ runOf } reports in a row)`
+        : String(e.message || e).slice(0, 300),
     };
     process.stderr.write(`issue-round: ${ it.ref } FAILED - ${ out[it.ref].error }\n`);
   }

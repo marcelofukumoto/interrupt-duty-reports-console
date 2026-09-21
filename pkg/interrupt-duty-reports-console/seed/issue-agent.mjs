@@ -29,14 +29,13 @@
 //   issue-agent.mjs list                            # every item that has a history
 //   issue-agent.mjs import    <dir>                 # one-off: seed histories from old transcripts
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const NS = process.env.IDR_NAMESPACE || 'interrupt-duty-reports-console';
 const LABEL = 'interrupt-duty.rancher.io';
 const CLAUDE = process.env.CLAUDE_BIN || '/workspace/.home/.local/bin/claude';
-const SEED = process.env.ISSUE_SEED_ROOT || '/workspace/.interrupt-duty';
 
 /** How many past rounds an agent is shown. Enough to see a pattern, not enough to drown. */
 const RECALL = Number(process.env.ISSUE_RECALL || 6);
@@ -68,9 +67,16 @@ function kube(args, input, quiet) {
   });
 }
 
+/**
+ * The document format, stamped so the next change to it does not have to guess.
+ *
+ * 1 - key, kind, first_seen, last_seen, standing[{id,at,note}], log[]
+ */
+const SCHEMA = 1;
+
 function emptyHistory(key, kind) {
   return {
-    key, kind: kind || null, first_seen: new Date().toISOString(), last_seen: null, standing: [], log: [],
+    schema: SCHEMA, key, kind: kind || null, first_seen: new Date().toISOString(), last_seen: null, standing: [], log: [],
   };
 }
 
@@ -79,7 +85,15 @@ function load(key, kind) {
   try {
     const cm = JSON.parse(kube(['get', 'configmap', cmName(key), '-n', NS, '-o', 'json'], undefined, true));
 
-    return { ...emptyHistory(key, kind), ...JSON.parse(cm.data?.['history.json'] || '{}'), _rv: cm.metadata.resourceVersion };
+    const h = { ...emptyHistory(key, kind), ...JSON.parse(cm.data?.['history.json'] || '{}'), _rv: cm.metadata.resourceVersion };
+
+    // Documents written before the format was stamped, and guidance written before it could be
+    // removed. Both are fixed up on read rather than in a migration - there is one shape in
+    // memory, and whatever is on disk becomes it.
+    h.schema = h.schema || SCHEMA;
+    h.standing = (h.standing || []).map((g, n) => ({ id: g.id || `${ g.at || 'g' }-${ n }`, ...g }));
+
+    return h;
   } catch {
     return emptyHistory(key, kind);
   }
@@ -153,11 +167,15 @@ function memory(history) {
       'if it contradicts something you concluded before, they win, and it applies to every',
       'future report on this item, not just the next one.',
       '',
+      'They are listed OLDEST FIRST. Where two of them conflict, the LATER one wins - people',
+      'change their minds and the newest instruction is the current one. Do not try to satisfy',
+      'both; say in class_dispute that you took the later reading.',
+      '',
     );
 
-    for (const s of history.standing) {
-      out.push(`- (${ s.at.slice(0, 10) }) ${ s.note }`);
-    }
+    history.standing.forEach((g, n) => {
+      out.push(`${ n + 1 }. (${ String(g.at).slice(0, 10) }) ${ g.note }`);
+    });
 
     out.push('');
   }
@@ -238,9 +256,36 @@ if (cmd === 'ask') {
   const [key, file] = rest;
   const history = load(key);
   const asked = readFileSync(file, 'utf8');
+
+  /**
+   * A round this agent did not answer, written down.
+   *
+   * Silence used to leave no trace: `ask` appended only when it got something parseable, so
+   * an agent that had failed every report for a week looked exactly like one that had never
+   * been asked. The reporter is told to call out an item that has gone several reports
+   * without an answer, and could not have known. A failure is a fact about the item.
+   */
+  const recordFailure = (why) => {
+    history.log.push({
+      at: new Date().toISOString(), kind: 'failed', report: process.env.ISSUE_REPORT_ID || null,
+      class: process.env.ISSUE_CLASS || null, error: String(why).slice(0, 300),
+    });
+
+    try {
+      save(trim(history));
+    } catch { /* the failure is already the bad news; do not add to it */ }
+  };
+
   // The brief, then what it knows, then today. The round still authors the "today" half, so
   // the two halves stay owned by the part that understands them.
-  const answer = runClaude(`${ memory(history) }${ asked }`);
+  let answer;
+
+  try {
+    answer = runClaude(`${ memory(history) }${ asked }`);
+  } catch (e) {
+    recordFailure(e?.message || e);
+    throw e;
+  }
 
   process.stdout.write(answer);
 
@@ -253,7 +298,9 @@ if (cmd === 'ask') {
     said = match ? JSON.parse(match[0]) : null;
   } catch { /* unparseable is the same as absent here */ }
 
-  if (said) {
+  if (!said) {
+    recordFailure('the agent answered, but not with a json object');
+  } else {
     history.log.push({
       at: new Date().toISOString(), kind: 'report', report: process.env.ISSUE_REPORT_ID || null,
       class: process.env.ISSUE_CLASS || null,
@@ -262,6 +309,26 @@ if (cmd === 'ask') {
     });
     save(trim(history));
   }
+} else if (cmd === 'forget') {
+  // Take back a piece of standing guidance.
+  //
+  // It was append-only to begin with, which made a mistake permanent: tell an agent something
+  // wrong and the only recourse was to contradict it and hope. Guidance a person can remove is
+  // the difference between a memory and a tattoo.
+  const [key, id] = rest;
+  const history = load(key);
+  const before = history.standing.length;
+
+  history.standing = history.standing.filter((g) => g.id !== id);
+
+  if (history.standing.length === before) {
+    process.stderr.write(`issue-agent: ${ key } has no standing guidance with id ${ id }\n`);
+    process.exit(1);
+  }
+
+  history.log.push({ at: new Date().toISOString(), kind: 'forgot', id });
+  save(trim(history));
+  process.stdout.write(`issue-agent: ${ key } forgot ${ id }\n`);
 } else if (cmd === 'note') {
   // A person, mid-report, saying something to one item's agent.
   //
@@ -286,7 +353,9 @@ if (cmd === 'ask') {
 
   process.stdout.write(reply);
 
-  history.standing.push({ at: new Date().toISOString(), note });
+  const at = new Date().toISOString();
+
+  history.standing.push({ id: `${ at }-${ history.standing.length }`, at, note });
   history.log.push({ at: new Date().toISOString(), kind: 'chat', note, reply });
   save(trim(history));
 } else if (cmd === 'history') {
@@ -303,9 +372,23 @@ if (cmd === 'ask') {
       try {
         const h = JSON.parse(cm.data?.['history.json'] || '{}');
 
-        if (h.key && h.last_seen) {
-          out[h.key] = h.last_seen;
+        if (!h.key) {
+          continue;
         }
+
+        // How many rounds in a row it has now failed. Counted backwards from the newest, so
+        // one answer anywhere resets it - which is what "in a row" has to mean.
+        let failures = 0;
+
+        for (const e of [...(h.log || [])].reverse()) {
+          if (e.kind === 'failed') {
+            failures++;
+          } else if (e.kind === 'report') {
+            break;
+          }
+        }
+
+        out[h.key] = { last_seen: h.last_seen || null, failures };
       } catch { /* one unreadable document is not the others' problem */ }
     }
   } catch { /* none yet */ }
@@ -358,7 +441,7 @@ if (cmd === 'ask') {
 
       if (jsonl) {
         for (const line of readFileSync(join(projects, jsonl), 'utf8').split('\n')) {
-          let o = null;
+          let o;
 
           try {
             o = JSON.parse(line);

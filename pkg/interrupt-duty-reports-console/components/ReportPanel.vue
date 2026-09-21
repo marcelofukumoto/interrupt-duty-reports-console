@@ -20,7 +20,8 @@ import Drawer from '@shell/components/Drawer/Chrome.vue';
 import RcButton from '@components/RcButton/RcButton.vue';
 import ItemCard from './ItemCard.vue';
 import CopyButton from './CopyButton.vue';
-import { issueHasAgent, tellIssueAgent } from '../lib/issue-agents';
+import { forgetGuidance, issueHistory, tellIssueAgent } from '../lib/issue-agents';
+import type { IssueHistory } from '../lib/issue-agents';
 import type { PodRef } from '../lib/exec';
 import { whenAgentsReady } from '../lib/agents';
 import { getReport } from '../lib/store';
@@ -291,6 +292,15 @@ const sending = ref(false);
 const reply = ref('');
 const chatError = ref('');
 const chatTarget = ref<PodRef | null>(null);
+/**
+ * What the open item's agent remembers.
+ *
+ * Worth showing at all only because memory became a document. While it was a resumed claude
+ * session the only way to see what an agent was carrying was to attach a terminal to it, so
+ * a recommendation that looked wrong could not be traced to what it was based on.
+ */
+const history = ref<IssueHistory | null>(null);
+const forgetting = ref('');
 
 async function toggleChat(ref_: string) {
   if (openChat.value === ref_) {
@@ -304,6 +314,7 @@ async function toggleChat(ref_: string) {
   reply.value = '';
   chatError.value = '';
   chatTarget.value = null;
+  history.value = null;
 
   try {
     const api = await whenAgentsReady(15000);
@@ -317,12 +328,15 @@ async function toggleChat(ref_: string) {
 
     const target = { pod, namespace: api.agent.namespace, container: api.agent.container };
 
-    if (!await issueHasAgent(target, ref_)) {
+    const h = await issueHistory(target, ref_);
+
+    if (!h || (!h.log.length && !h.standing.length)) {
       chatError.value = 'This item has no agent yet - it gets one the first time a report asks about it.';
 
       return;
     }
 
+    history.value = h;
     chatTarget.value = target;
   } catch (e: any) {
     chatError.value = e?.message || String(e);
@@ -348,11 +362,35 @@ async function sendNote(ref_: string) {
   try {
     reply.value = await tellIssueAgent(chatTarget.value, ref_, note.value);
     note.value = '';
+    // It has just been written into the document, so re-read rather than guessing at it.
+    history.value = await issueHistory(chatTarget.value, ref_).catch(() => history.value);
   } catch (e: any) {
     chatError.value = e?.message || String(e);
   } finally {
     sending.value = false;
   }
+}
+
+async function forget(ref_: string, id: string) {
+  if (!chatTarget.value || forgetting.value) {
+    return;
+  }
+
+  forgetting.value = id;
+
+  try {
+    await forgetGuidance(chatTarget.value, ref_, id);
+    history.value = await issueHistory(chatTarget.value, ref_);
+  } catch (e: any) {
+    chatError.value = e?.message || String(e);
+  } finally {
+    forgetting.value = '';
+  }
+}
+
+/** The rounds worth showing - newest first, and only the ones that said something. */
+function recentRounds(h: IssueHistory) {
+  return [...h.log].reverse().filter((e) => e.kind === 'report' || e.kind === 'failed').slice(0, 4);
 }
 
 function chipsFor(section: { kind: string }, item: AnyItem) {
@@ -590,6 +628,48 @@ const asText = computed(() => {
                 </Banner>
 
                 <template v-else-if="chatTarget">
+                  <!--
+                    What it remembers, before what you might tell it. A person about to correct
+                    an agent should be able to see what it is working from - that is the whole
+                    reason the memory became a document instead of a transcript inside a
+                    process.
+                  -->
+                  <div v-if="history" class="panel__memory">
+                    <div class="panel__memory-head">
+                      What this agent remembers
+                      <span class="panel__memory-since">since {{ history.first_seen.slice(0, 10) }}</span>
+                    </div>
+
+                    <ul v-if="history.standing.length" class="panel__guidance">
+                      <li v-for="g in history.standing" :key="g.id">
+                        <span class="panel__guidance-when">{{ g.at.slice(0, 10) }}</span>
+                        <span class="panel__guidance-note">{{ g.note }}</span>
+                        <button
+                          class="panel__guidance-forget"
+                          :disabled="!!forgetting"
+                          :title="'Stop carrying this into future reports'"
+                          @click="forget(itemRef(item), g.id)"
+                        >
+                          {{ forgetting === g.id ? '…' : 'forget' }}
+                        </button>
+                      </li>
+                    </ul>
+                    <p v-else class="panel__memory-empty">
+                      No standing guidance — it is going on the ticket and its own past reports.
+                    </p>
+
+                    <ul class="panel__rounds">
+                      <li v-for="(e, i) in recentRounds(history)" :key="i" :class="{ 'is-failed': e.kind === 'failed' }">
+                        <span class="panel__rounds-when">{{ e.at.slice(0, 10) }}</span>
+                        <template v-if="e.kind === 'failed'">did not answer — {{ e.error }}</template>
+                        <template v-else>
+                          <strong>{{ e.next_step?.verb || e.class }}</strong>
+                          {{ e.changed }}
+                        </template>
+                      </li>
+                    </ul>
+                  </div>
+
                   <label class="panel__chat-label">
                     Tell this item's agent something. It remembers the item, and this becomes
                     standing guidance it carries into future reports.
@@ -707,6 +787,88 @@ const asText = computed(() => {
 .panel__chat-note {
   color: var(--muted);
   font-size: 11px;
+}
+
+.panel__memory {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--body-bg);
+}
+
+.panel__memory-head {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.panel__memory-since,
+.panel__memory-empty {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.panel__memory-since {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.panel__memory-empty {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.panel__guidance,
+.panel__rounds {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.panel__guidance li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+.panel__guidance-when,
+.panel__rounds-when {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.panel__guidance-note {
+  flex: 1;
+}
+
+.panel__guidance-forget {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--link);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.panel__guidance-forget:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.panel__rounds li {
+  display: flex;
+  gap: 6px;
+  color: var(--muted);
+  padding: 1px 0;
+}
+
+.panel__rounds li.is-failed {
+  color: var(--error);
 }
 
 .panel__chat-reply {

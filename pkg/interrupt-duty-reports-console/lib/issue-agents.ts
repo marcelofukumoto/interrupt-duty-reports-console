@@ -32,22 +32,30 @@ function ensureSeed(target: PodRef): Promise<void> {
   return seeded;
 }
 
-/** One entry in what an agent remembers - a round it reported, or something it was told. */
+/** One entry in what an agent remembers - a round, a failure, or something it was told. */
 export interface IssueHistoryEntry {
   at: string;
-  kind: 'report' | 'chat';
+  kind: 'report' | 'chat' | 'failed' | 'forgot';
   class?: string | null;
   changed?: string;
   next_step?: { verb: string; explanation: string } | null;
   suggested_comment?: string | null;
   note?: string;
   reply?: string;
+  error?: string;
+}
+
+export interface IssueGuidance {
+  id: string;
+  at: string;
+  note: string;
 }
 
 export interface IssueHistory {
+  schema: number;
   key: string;
   first_seen: string;
-  standing: { at: string; note: string }[];
+  standing: IssueGuidance[];
   log: IssueHistoryEntry[];
 }
 
@@ -73,6 +81,27 @@ export async function issueHistory(target: PodRef, key: string): Promise<IssueHi
     return parsed?.key ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Take back a piece of standing guidance.
+ *
+ * Guidance was append-only when this design landed, which made a mistake permanent - the only
+ * recourse was to contradict yourself and hope the agent picked the later reading. Something a
+ * person can remove is the difference between a memory and a tattoo.
+ */
+export async function forgetGuidance(target: PodRef, key: string, id: string): Promise<void> {
+  await ensureSeed(target);
+
+  const result = await podExec(
+    target,
+    ['node', `${ ROOT }/issue-agent.mjs`, 'forget', key, id],
+    { timeoutMs: 30000 },
+  );
+
+  if (result.code !== 0) {
+    throw new Error((result.stderr || '').trim() || 'That guidance could not be removed.');
   }
 }
 
