@@ -307,16 +307,23 @@ for (const [n, it] of items.entries()) {
       }));
     } catch { /* the agent answered; failing to note it is not worth losing that */ }
   } catch (e) {
-    // Exit 3 is the agent standing down because somebody has its chat open. That is not a
-    // failure, it is the right outcome: a person mid-conversation outranks the nightly round,
-    // and whatever they say will be in the transcript the next round resumes anyway.
+    // Exit 3 is the agent standing down because somebody is mid-conversation with it right
+    // now. That is the right outcome: a person typing outranks the nightly round, and what
+    // they say will be in the transcript this round would have resumed anyway.
+    //
+    // It is no longer the answer for a chat merely being OPEN. A pane closed in the browser
+    // leaves a claude running on an abandoned pty, and that used to count as "busy" forever:
+    // one item reported nothing for four days while every report said its chat was open.
+    // issue-agent.sh now reaps an idle holder instead, so exit 3 means a live conversation.
     const busy = e?.status === 3;
 
     out[it.ref] = {
       ...it,
       ok:    false,
       busy,
-      error: busy ? "its chat was open, so the round left it alone" : String(e.message || e).slice(0, 300),
+      error: busy
+        ? "somebody is talking to it right now, so the round left it alone - it will report next time"
+        : String(e.message || e).slice(0, 300),
     };
     process.stderr.write(`issue-round: ${ it.ref } FAILED - ${ out[it.ref].error }\n`);
   }

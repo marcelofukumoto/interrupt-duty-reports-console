@@ -92,9 +92,11 @@ export async function tellIssueAgent(target: PodRef, key: string, note: string):
 
   await podWriteFile(target, file, framed, { mode: '644', owner: '1000:1000' });
 
+  // 'chat' - the person is right here waiting, so this call never stands down. The round
+  // yields to an open conversation; the conversation does not yield to itself.
   const result = await podExec(
     target,
-    ['/bin/sh', `${ ROOT }/issue-agent.sh`, 'ask', key, file],
+    ['/bin/sh', `${ ROOT }/issue-agent.sh`, 'ask', key, file, 'chat'],
     { timeoutMs: 600000 },
   );
 

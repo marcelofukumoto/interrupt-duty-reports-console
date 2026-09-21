@@ -34,9 +34,15 @@ You may:
   computed class is wrong. Leave the class as computed and carry the dispute through, so a
   human can see the disagreement.
 
-An entry with `"ok": false` is an agent that did not answer in time. Include the item with the
-facts that are known, `next_step` null, and say plainly in its `explanation` that its agent did
-not report today — do not invent a recommendation in its place.
+An entry with `"ok": false` is an agent that did not report. Include the item with the facts
+that are known, `next_step` null, and say plainly in its `explanation` that its agent did not
+report today and **why** — quote the entry's `error` rather than paraphrasing it, because the
+reason is the actionable part. Do not invent a recommendation in its place.
+
+Treat a repeated non-answer as a fault worth seeing, not as routine: `"busy": true` is the one
+benign case (somebody was mid-conversation with it, and it will report next time). Anything
+else is the item's agent failing, and an item that has now gone several reports without one is
+worth saying so about in its explanation.
 
 > **Scope:** this report covers **Jira active queues** and **recent GitHub community issues**.
 > **Dependabot is out of scope** — it is handled by its own separate process. The aged
