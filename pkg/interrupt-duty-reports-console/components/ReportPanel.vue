@@ -20,7 +20,7 @@ import Drawer from '@shell/components/Drawer/Chrome.vue';
 import RcButton from '@components/RcButton/RcButton.vue';
 import ItemCard from './ItemCard.vue';
 import CopyButton from './CopyButton.vue';
-import { issueDir, tellIssueAgent } from '../lib/issue-agents';
+import { issueHasAgent, tellIssueAgent } from '../lib/issue-agents';
 import type { PodRef } from '../lib/exec';
 import { whenAgentsReady } from '../lib/agents';
 import { getReport } from '../lib/store';
@@ -317,7 +317,7 @@ async function toggleChat(ref_: string) {
 
     const target = { pod, namespace: api.agent.namespace, container: api.agent.container };
 
-    if (!await issueDir(target, ref_)) {
+    if (!await issueHasAgent(target, ref_)) {
       chatError.value = 'This item has no agent yet - it gets one the first time a report asks about it.';
 
       return;

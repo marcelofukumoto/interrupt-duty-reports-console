@@ -2,7 +2,7 @@
 # Ask every item's own agent about its own item, one at a time.
 #
 # The report used to be one agent reading everything and writing everything, so what it learned
-# about a ticket died with the run. Each item has a standing agent now (issue-agent.sh), and
+# about a ticket died with the run. Each item has a standing agent now (issue-agent.mjs), and
 # this is the round that visits them: it hands each one today's facts about ITS item and
 # collects what comes back, verbatim, into contributions.json.
 #
@@ -26,14 +26,14 @@ DIR=${1:?issue-round.sh needs the run directory}
 [ -f "$DIR/data.json" ] || { echo "issue-round.sh: no data.json in $DIR" >&2; exit 2; }
 
 ROOT=$(dirname "$0")
-AGENT="$ROOT/issue-agent.sh"
-[ -x "$AGENT" ] || AGENT="sh $ROOT/issue-agent.sh"
+# The agent is a document reader now, not a resumed session - see issue-agent.mjs for why.
+AGENT="node $ROOT/issue-agent.mjs"
 
 WORK="$DIR/issue-round"
 mkdir -p "$WORK"
 
 # One file per item: its data, its computed class, and the shape of the answer wanted back.
-node -e '
+ISSUE_AGENT_CMD="$AGENT" node -e '
 const fs = require("fs");
 const [dataPath, workDir, brief] = process.argv.slice(1);
 const d = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -82,18 +82,25 @@ function jiraClass(t) {
   return { cls: "ACT_NOW", rule: "jira.fallback" };
 }
 
-// What this item looked like the last time its agent saw it. An agent that remembers the
+// What each item looked like the last time its agent saw it. An agent that remembers the
 // ticket does not need the description and twenty-four comments again - it needs what is NEW.
 // Re-sending everything every day would pay for the memory and then not use it.
-function lastSeen(ref) {
-  const slug = ref.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const file = `${ process.env.ISSUE_AGENT_ROOT || "/workspace/idr-issues" }/${ slug }/last-seen.json`;
-
+//
+// Every agent\u2019s in ONE call: the histories are ConfigMaps now, so asking per item would
+// be a kubectl per item for data that arrives together.
+const SEEN = (() => {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(require("child_process").execSync(
+      `${ process.env.ISSUE_AGENT_CMD } last-seen`,
+      { encoding: "utf8", env: { ...process.env, KUBECONFIG: "/dev/null" } },
+    ) || "{}");
   } catch {
-    return null;
+    return {};
   }
+})();
+
+function lastSeen(ref) {
+  return SEEN[ref] || null;
 }
 
 const items = [];
@@ -182,6 +189,8 @@ const { execFileSync } = require("child_process");
 const [workDir, agent] = process.argv.slice(1);
 const items = JSON.parse(fs.readFileSync(`${ workDir }/items.json`, "utf8"));
 const out = {};
+// The run directory is named for the report, so the report id is simply its name.
+const reportId = require("path").basename(require("path").dirname(workDir));
 
 /** One finished report item: the data\u2019s facts, wrapped around the agent\u2019s words. */
 function reportItem(it, said) {
@@ -237,8 +246,12 @@ for (const [n, it] of items.entries()) {
 
   process.stderr.write(`issue-round: ${ it.ref } (${ n + 1 }/${ items.length }) ${ it.cls }\n`);
 
+  // The class and the run id travel in the environment so the agent can stamp them into its
+  // own history without the round having to write that document itself.
+  const env = { ...process.env, ISSUE_CLASS: it.cls, ISSUE_REPORT_ID: reportId, KUBECONFIG: "/dev/null" };
+
   try {
-    let answer = execFileSync(argv[0], argv.slice(1), { encoding: "utf8", timeout: 600000 });
+    let answer = execFileSync(argv[0], argv.slice(1), { encoding: "utf8", timeout: 600000, env });
     let match = answer.match(/\{[\s\S]*\}/);
     let said = match ? JSON.parse(match[0]) : null;
 
@@ -270,7 +283,7 @@ for (const [n, it] of items.entries()) {
       process.stderr.write(`issue-round: ${ it.ref } comment ${ draft.length } chars, asking once for shorter\n`);
 
       try {
-        answer = execFileSync(argv[0], argv.slice(1, -1).concat([again]), { encoding: "utf8", timeout: 600000 });
+        answer = execFileSync(argv[0], argv.slice(1, -1).concat([again]), { encoding: "utf8", timeout: 600000, env });
         match = answer.match(/\{[\s\S]*\}/);
 
         const shorter = match ? JSON.parse(match[0]) : null;
@@ -293,37 +306,30 @@ for (const [n, it] of items.entries()) {
 
     // Only after it answered. A turn that failed did not see today, so tomorrow should still
     // offer it what it missed rather than skip straight past.
-    const slug = it.ref.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-    const dir = `${ process.env.ISSUE_AGENT_ROOT || "/workspace/idr-issues" }/${ slug }`;
-
     try {
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(`${ dir }/last-seen.json`, JSON.stringify({
+      const seenFile = `${ workDir }/${ String(n).padStart(3, "0") }.seen`;
+
+      fs.writeFileSync(seenFile, JSON.stringify({
         at:               new Date().toISOString(),
         status:           it.item.status || null,
         idle_days:        it.item.idle_days ?? null,
         comments_count:   it.item.comments_count ?? null,
         last_comment_at:  it.item.last_comment_at || null,
       }));
+      execFileSync(argv[0], argv.slice(1, -3).concat(["seen", it.ref, seenFile]), { encoding: "utf8", timeout: 60000, env });
     } catch { /* the agent answered; failing to note it is not worth losing that */ }
   } catch (e) {
-    // Exit 3 is the agent standing down because somebody is mid-conversation with it right
-    // now. That is the right outcome: a person typing outranks the nightly round, and what
-    // they say will be in the transcript this round would have resumed anyway.
+    // There is no "busy" any more, and that is the point of the rewrite.
     //
-    // It is no longer the answer for a chat merely being OPEN. A pane closed in the browser
-    // leaves a claude running on an abandoned pty, and that used to count as "busy" forever:
-    // one item reported nothing for four days while every report said its chat was open.
-    // issue-agent.sh now reaps an idle holder instead, so exit 3 means a live conversation.
-    const busy = e?.status === 3;
-
+    // Agents used to be resumed sessions - one live process per item, one writer at a time -
+    // so the round had to stand down whenever anything else held an item\u2019s transcript, and an
+    // abandoned browser pane could hold one indefinitely. A document has no such state: this
+    // round and a person\u2019s chat can both append, in any order, and both are kept. A failure
+    // here is now a real failure and reads as one.
     out[it.ref] = {
       ...it,
       ok:    false,
-      busy,
-      error: busy
-        ? "somebody is talking to it right now, so the round left it alone - it will report next time"
-        : String(e.message || e).slice(0, 300),
+      error: String(e.message || e).slice(0, 300),
     };
     process.stderr.write(`issue-round: ${ it.ref } FAILED - ${ out[it.ref].error }\n`);
   }

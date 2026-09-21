@@ -39,10 +39,10 @@ that are known, `next_step` null, and say plainly in its `explanation` that its 
 report today and **why** — quote the entry's `error` rather than paraphrasing it, because the
 reason is the actionable part. Do not invent a recommendation in its place.
 
-Treat a repeated non-answer as a fault worth seeing, not as routine: `"busy": true` is the one
-benign case (somebody was mid-conversation with it, and it will report next time). Anything
-else is the item's agent failing, and an item that has now gone several reports without one is
-worth saying so about in its explanation.
+Treat a non-answer as a fault worth seeing, not as routine. An agent no longer stands down for
+anything - it is a fresh run against a stored history every time - so `"ok": false` means it
+genuinely failed, and an item that has gone several reports without one is worth saying so
+about in its explanation.
 
 > **Scope:** this report covers **Jira active queues** and **recent GitHub community issues**.
 > **Dependabot is out of scope** — it is handled by its own separate process. The aged

@@ -128,7 +128,7 @@ export async function writeSeed(target: PodRef): Promise<void> {
   const files = [
     'gather.mjs', 'run.sh', 'publish.sh', 'daily-report.prompt.md',
     // The round of per-issue agents, and the brief each of them reads.
-    'issue-round.sh', 'issue-agent.sh', 'issue-brief.md', 'issue-prune.mjs',
+    'issue-round.sh', 'issue-agent.mjs', 'issue-brief.md', 'issue-prune.mjs',
   ];
 
   for (const name of files) {

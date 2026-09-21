@@ -55,7 +55,7 @@ function todaysKeys() {
 }
 
 function agents() {
-  const out = execFileSync('/bin/sh', [`${ ROOT }/issue-agent.sh`, 'list'], { encoding: 'utf8' });
+  const out = execFileSync('node', [`${ ROOT }/issue-agent.mjs`, 'list'], { encoding: 'utf8', env: { ...process.env, KUBECONFIG: '/dev/null' } });
 
   return out.split('\n').filter(Boolean).map((line) => line.split('\t')[0]).filter(Boolean);
 }
@@ -123,7 +123,7 @@ for (const key of absent) {
     continue;
   }
 
-  execFileSync('/bin/sh', [`${ ROOT }/issue-agent.sh`, 'end', key], { encoding: 'utf8' });
+  execFileSync('node', [`${ ROOT }/issue-agent.mjs`, 'end', key], { encoding: 'utf8', env: { ...process.env, KUBECONFIG: '/dev/null' } });
   ended++;
   process.stderr.write(`issue-prune: ended ${ key } - ${ verdict.why }\n`);
 }
