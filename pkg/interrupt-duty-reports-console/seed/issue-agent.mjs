@@ -28,10 +28,38 @@
 //   issue-agent.mjs end       <key>                 # the item is finished with; forget it
 //   issue-agent.mjs list                            # every item that has a history
 //   issue-agent.mjs import    <dir>                 # one-off: seed histories from old transcripts
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Become uid 1000 before doing anything, if we arrived as root.
+ *
+ * claude REFUSES --dangerously-skip-permissions as root, and the two callers arrive as
+ * different users: the round runs inside the agents pane, which is already node, while the
+ * console execs into the pod over the k8s exec API and lands as ROOT. So the browser path -
+ * and only the browser path - died on "cannot be used with root/sudo privileges".
+ *
+ * The shell version this replaced re-exec-ed itself for exactly this reason and the line was
+ * not carried across. Worse, every test of the new one was run with `setpriv --reuid=1000` in
+ * the kubectl command, so the root path was never once exercised.
+ *
+ * Doing it here rather than around the claude call keeps one identity for the whole run:
+ * kubectl, the temp directory and the transcript cleanup all belong to the same user, instead
+ * of root leaving files behind that node then cannot rewrite.
+ */
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  const home = process.env.HOME && process.env.HOME !== '/root' ? process.env.HOME : '/workspace/.home';
+  const relaunch = spawnSync('setpriv', [
+    '--reuid=1000', '--regid=1000', '--init-groups',
+    '/usr/bin/env', `HOME=${ home }`,
+    'node', fileURLToPath(import.meta.url), ...process.argv.slice(2),
+  ], { stdio: 'inherit' });
+
+  process.exit(relaunch.status === null ? 1 : relaunch.status);
+}
 
 const NS = process.env.IDR_NAMESPACE || 'interrupt-duty-reports-console';
 const LABEL = 'interrupt-duty.rancher.io';
