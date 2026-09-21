@@ -214,14 +214,21 @@ function memory(history) {
  */
 function runClaude(text) {
   const dir = mkdtempSync(join(tmpdir(), 'issue-'));
+  const home = process.env.HOME || '/workspace/.home';
 
   try {
     return execFileSync(CLAUDE, ['--dangerously-skip-permissions', '-p', text], {
       cwd: dir, encoding: 'utf8', timeout: 600000, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, HOME: process.env.HOME || '/workspace/.home' },
+      env: { ...process.env, HOME: home },
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    // AND the transcript, which does NOT live in that directory: claude keeps one per working
+    // directory under ~/.claude/projects/<path with slashes as dashes>, so deleting the
+    // directory leaves the transcript behind. Nothing resumes any more - the memory is the
+    // document - so each of these is dead weight, and one per item per report is how a disk
+    // fills up quietly. Measured: three were already stranded before this was caught.
+    rmSync(join(home, '.claude', 'projects', dir.replace(/\//g, '-')), { recursive: true, force: true });
   }
 }
 
