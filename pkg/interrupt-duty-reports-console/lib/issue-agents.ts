@@ -105,7 +105,16 @@ export async function tellIssueAgent(target: PodRef, key: string, note: string):
   const said = (result.stdout || '').trim();
 
   if (!said) {
-    throw new Error((result.stderr || '').trim() || 'The agent did not answer.');
+    // Exit 4 is the one refusal a person should see as normal: the round is doing this item's
+    // work right now, and the composer waits rather than killing it mid-turn. Everything else
+    // is a real failure and reads as one.
+    const why = (result.stderr || '').trim();
+
+    if (result.code === 4) {
+      throw new Error(`Its agent is writing today's report for this item right now — try again in a minute.`);
+    }
+
+    throw new Error(why || 'The agent did not answer.');
   }
 
   return said;

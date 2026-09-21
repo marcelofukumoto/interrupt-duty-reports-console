@@ -70,6 +70,23 @@ blocker_in() {
   done
 }
 
+# What KIND of claude is holding this agent: "pane" or "batch".
+#
+# Two very different things end up in the same directory, and the difference decides who may
+# kill whom:
+#   batch - the nightly round, `-p <prompt>`, headless, doing today's work for this item.
+#   pane  - a terminal chat, interactive, no -p. This is the one that gets abandoned when a
+#           browser tab closes, and the one the composer is entitled to take back.
+# Killing a pane costs a session nobody was sitting at; killing a batch throws away the item's
+# report mid-turn. So the composer displaces a pane and waits for a batch.
+blocker_mode() {
+  _c=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)
+  case "$_c" in
+    *' -p '*|*' -p') echo batch ;;
+    *)               echo pane  ;;
+  esac
+}
+
 # Seconds since anything was said in this conversation.
 #
 # The transcript's mtime, NOT the process's age or its parent. A live conversation appends to
@@ -181,9 +198,14 @@ case "$cmd" in
     pid=$(blocker_in "$d")
 
     if [ -n "$pid" ]; then
-      if [ "$WHO" = "chat" ]; then
-        # The person is here, so whatever else holds the transcript is either their own
-        # abandoned pane or nothing that should outrank them.
+      if [ "$WHO" = "chat" ] && [ "$(blocker_mode "$pid")" = "batch" ]; then
+        # The round is doing this item's work right now. The person can wait a minute; the
+        # report cannot be un-thrown-away. Exit 4 so the composer can say something true
+        # rather than showing them a stand-down message about themselves.
+        echo "issue-agent: $KEY is working on today's report right now - try again in a minute" >&2
+        exit 4
+      elif [ "$WHO" = "chat" ]; then
+        # An abandoned pane, or their own earlier chat. The person waiting outranks it.
         kill "$pid" 2>/dev/null || true
         sleep 1
         kill -9 "$pid" 2>/dev/null || true
