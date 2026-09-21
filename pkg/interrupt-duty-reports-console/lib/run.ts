@@ -233,6 +233,96 @@ export async function startRun(principalId: string, startedBy?: string): Promise
 }
 
 /**
+ * How many report agents may be alive at once.
+ *
+ * A report agent is one claude in the pod, measured at ~270 MiB - trivial on its own and not
+ * trivial thirty times over, on the node that also runs Rancher. A cap bounds it exactly,
+ * which a time window does not: the window costs whatever the report rate happens to be.
+ *
+ * Three, so the day you are on and the couple you are likely to compare it with stay warm.
+ */
+export const LIVE_AGENTS_MAX = 3;
+
+/**
+ * The oldest a report agent may get, however recently somebody looked at it.
+ *
+ * The cap alone would keep three alive forever if nobody generated a new report. Seven days is
+ * the point past which a conversation is history rather than working state - and history is
+ * what the stored report is for.
+ */
+export const AGENT_MAX_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Which of these reports still has a live agent.
+ *
+ * `projectSessions` is per project and a project is one report, so this is one call per report
+ * - which is why the caller passes only the reports that could plausibly be alive rather than
+ * all hundred. Anything past AGENT_MAX_LIFE_MS is dead by rule and needs no asking.
+ */
+export async function liveAgents(ids: string[]): Promise<Set<string>> {
+  const api = agentsApi();
+
+  if (!api) {
+    return new Set();
+  }
+
+  const found = await Promise.all(ids.map(async(id) => {
+    const sessions = await api.agent.projectSessions(agentProject(id)).catch(() => []);
+
+    return sessions.length ? id : '';
+  }));
+
+  return new Set(found.filter(Boolean));
+}
+
+/**
+ * Start an agent for a report that no longer has one.
+ *
+ * Reports outlive their conversations on purpose, so most days the one you want to talk to has
+ * been swept. Rather than leaving the button dead, this gives that report a fresh agent
+ * pointed at what the run left behind - the report, the data it was built from and what each
+ * item's agent contributed.
+ *
+ * Deliberately NOT a resume of the original conversation. Resuming re-sends a transcript that
+ * runs to megabytes and reopens a process nothing tracks; a new agent reading the run
+ * directory has the same facts, costs a fraction, and is ended by the same rules as any other.
+ */
+export async function startReportAgent(meta: { id: string; reportDate: string }): Promise<string> {
+  const api = agentsApi();
+
+  if (!api) {
+    throw new Error('The Agents extension is not available on this page, so there is no agent to start.');
+  }
+
+  if (!await api.agent.pod()) {
+    throw new Error('The agent pod is not running, so there is nowhere to start one.');
+  }
+
+  const runDir = `${ ROOT }/${ meta.id }`;
+
+  return api.agent.startInProject(
+    agentProject(meta.id),
+    `Report ${ meta.reportDate }`,
+    [
+      `You are the agent for the Rancher UI interrupt-duty report of ${ meta.reportDate }.`,
+      '',
+      'That report has already been written. You are NOT being asked to regenerate it, to run',
+      'the gather, or to change anything - somebody has opened a conversation to ask you about',
+      'it, and your job is to be useful about what is already there.',
+      '',
+      `What the run left behind, in ${ runDir }:`,
+      '  report.json         the finished report as the console renders it',
+      '  data.json           the Jira and GitHub facts it was built from',
+      '  contributions.json  what each item\u2019s own standing agent said about its item',
+      '',
+      'Read report.json now so you can answer without a delay, and then say in one short line',
+      'that you are ready and what the report covers. Do not summarise the whole thing back -',
+      'they can already see it.',
+    ].join('\n'),
+  );
+}
+
+/**
  * End the conversations of runs that are over.
  *
  * A conversation does not end when the work in it does. claude-session.sh runs claude in a loop

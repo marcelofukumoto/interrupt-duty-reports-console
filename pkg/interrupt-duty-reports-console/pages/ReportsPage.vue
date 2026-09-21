@@ -27,10 +27,11 @@ import { credentialsReady, isAdminUser, readCredentialStatus } from '../lib/cred
 import type { CredentialStatus } from '../lib/credentials';
 import type { AgentsStatus } from '../lib/agents';
 import {
-  deleteReport, listReports, MAX_REPORTS, pruneToCap, setStatus,
+  deleteReport, listReports, MAX_REPORTS, pruneToCap, setStatus, updateMeta,
 } from '../lib/store';
 import {
-  endSessions, runPhase, startRun, stopRun, sweepRunDirectories,
+  AGENT_MAX_LIFE_MS, LIVE_AGENTS_MAX, endSessions, liveAgents, runPhase, startReportAgent,
+  startRun, stopRun, sweepRunDirectories,
 } from '../lib/run';
 import type { RunPhase } from '../lib/run';
 import {
@@ -126,7 +127,22 @@ const POLL_IDLE_MS = 45000;
  * the session out from under it. Anything derived from one tab's state is a rule the other tabs
  * do not follow.
  */
-const SESSION_GRACE_MS = 30 * 60 * 1000;
+/**
+ * Which report agents are alive right now, refreshed by the loop.
+ *
+ * Drives both halves of it: the row shows whether there is anything to talk to, and the sweep
+ * only ends what is actually there.
+ */
+const liveAgentIds = ref<Set<string>>(new Set());
+const startingAgent = ref('');
+/**
+ * Ended once, not once per poll.
+ *
+ * `end` on a conversation that is already gone is harmless but not free, and the loop runs
+ * every four seconds while a report is running. An id is cleared from here the moment somebody
+ * starts a new agent for it, so a restarted report can be swept again.
+ */
+const endedAgents = new Set<string>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 let stopped = false;
 /**
@@ -236,19 +252,31 @@ async function sweep() {
   // Named, not enumerated. Only conversations this extension recorded on a report of its own,
   // and only where that report finished long enough ago - so a run still being set up, whose id
   // is not written down yet, can never be caught by somebody else's sweep.
-  const stale = reports.value
-    .filter((report) => {
-      if (report.status === 'running' || !report.session || report.session === watchedSession.value) {
-        return false;
-      }
+  // A report agent is kept alive while it is one of the few most recently used, and no longer
+  // than a week whatever happens. Older rules measured from "finished", which kept alive the
+  // ones nobody opened and swept the one somebody was reading.
+  const touched = (report: ReportMeta) => Date.parse(report.agentTouchedAt || report.startedAt || '') || 0;
+  const candidates = reports.value
+    .filter((report) => report.status !== 'running' && report.session && report.session !== watchedSession.value)
+    .sort((a, b) => touched(b) - touched(a));
 
-      const finished = Date.parse(report.finishedAt || '');
+  const keep = new Set(
+    candidates.filter((report) => now - touched(report) < AGENT_MAX_LIFE_MS).slice(0, LIVE_AGENTS_MAX).map((r) => r.id),
+  );
 
-      return !Number.isNaN(finished) && now - finished >= SESSION_GRACE_MS;
-    })
-    .map((report) => report.session || '');
+  const stale = candidates
+    .filter((report) => !keep.has(report.id) && !endedAgents.has(report.id))
+    .map((report) => {
+      endedAgents.add(report.id);
+
+      return report.session || '';
+    });
 
   await endSessions(stale).catch(() => undefined);
+
+  // Ask only about the ones the rules would let live; everything else is dead by rule and
+  // needs no call. One request per report, so this is what stops it being a hundred.
+  liveAgentIds.value = await liveAgents([...keep]).catch(() => new Set<string>());
   await sweepRunDirectories(reports.value.map((r) => r.id)).catch(() => undefined);
 }
 
@@ -451,6 +479,52 @@ async function remove(meta: ReportMeta) {
 }
 
 /**
+ * Mark an agent as used, so the cap evicts the ones nobody is reading first.
+ *
+ * Written to the report rather than held in the page: another tab runs its own sweep and knows
+ * nothing about this one, so anything kept only in memory is a rule the other tabs do not
+ * follow - the same reason the old grace period was measured in time rather than in "is
+ * somebody looking at it".
+ */
+function touchAgent(meta: ReportMeta) {
+  const at = new Date().toISOString();
+
+  meta.agentTouchedAt = at;
+  updateMeta(meta.id, (m) => ({ ...m, agentTouchedAt: at })).catch(() => undefined);
+}
+
+/**
+ * Give a report an agent when it has none.
+ *
+ * Most days the conversation a report was written in has been swept, so this is the button
+ * doing something rather than being disabled: a fresh agent, pointed at what that run left on
+ * disk, ended by the same rules as any other.
+ */
+async function startAgentFor(meta: ReportMeta) {
+  if (startingAgent.value) {
+    return;
+  }
+
+  startingAgent.value = meta.id;
+  error.value = '';
+
+  try {
+    const session = await startReportAgent(meta);
+    const saved = await updateMeta(meta.id, (m) => ({ ...m, session, agentTouchedAt: new Date().toISOString() }));
+
+    // It can be swept again now that it is a different conversation.
+    endedAgents.delete(meta.id);
+    liveAgentIds.value = new Set([...liveAgentIds.value, meta.id]);
+    await refresh();
+    watchSession(saved || { ...meta, session });
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    startingAgent.value = '';
+  }
+}
+
+/**
  * Show the run's conversation, in a drawer of our own.
  *
  * The same Rancher drawer the report opens in, holding the Agents extension's terminal. Driving
@@ -463,6 +537,7 @@ function watchSession(meta: ReportMeta, fromReport = false) {
   }
 
   watchedSession.value = meta.session;
+  touchAgent(meta);
 
   store.commit('slideInPanel/open', {
     component:      AgentSessionPanel,
@@ -499,6 +574,9 @@ function open(meta: ReportMeta) {
       previousDate: previous?.reportDate,
       onDelete:     remove,
       onWatch:      (value: ReportMeta) => watchSession(value, true),
+      // A run in flight always has a conversation - it is the one doing the work - and it is
+      // deliberately outside the cap, so it never appears in liveAgentIds.
+      agentLive:    meta.status === 'running' || liveAgentIds.value.has(meta.id),
     },
   });
 }
@@ -678,8 +756,12 @@ function open(meta: ReportMeta) {
                 v-for="report in group.reports"
                 :key="report.id"
                 :meta="report"
+                :agent-live="liveAgentIds.has(report.id)"
+                :agent-starting="startingAgent === report.id"
                 @open="open"
                 @delete="remove"
+                @agent="watchSession($event)"
+                @start-agent="startAgentFor"
               />
             </ul>
           </section>

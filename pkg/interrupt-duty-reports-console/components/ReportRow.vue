@@ -17,14 +17,32 @@ import { computed, ref } from 'vue';
 import { countChips, elapsedLabel, statusStyle, whenLabel } from '../lib/format';
 import type { ReportMeta } from '../types';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   meta: ReportMeta;
-}>();
+  /** Whether this report has a live agent to talk to. */
+  agentLive?: boolean;
+  /** True while this row's agent is being started. */
+  agentStarting?: boolean;
+}>(), { agentLive: false, agentStarting: false });
 
 const emit = defineEmits<{
   (e: 'open', meta: ReportMeta): void;
   (e: 'delete', meta: ReportMeta): void;
+  (e: 'agent', meta: ReportMeta): void;
+  (e: 'start-agent', meta: ReportMeta): void;
 }>();
+
+/**
+ * The agent control, as one button with two jobs.
+ *
+ * A report agent does not live as long as its report - there is a cap on how many run at once
+ * and a week's ceiling on any of them - so most rows have no conversation to open. Showing a
+ * dead "Agent session" button was the old behaviour and it silently opened an empty chat.
+ * Here the row says which it is, and clicking does the right one.
+ */
+function agentClick() {
+  emit(props.agentLive ? 'agent' : 'start-agent', props.meta);
+}
 
 const confirming = ref(false);
 const deleting = ref(false);
@@ -110,6 +128,20 @@ function remove() {
     </button>
 
     <div class="row__side">
+      <button
+        v-if="meta.status !== 'running'"
+        type="button"
+        class="row__agent"
+        :class="{ 'is-live': agentLive }"
+        :disabled="agentStarting"
+        :title="agentLive ? 'Open this report\u2019s agent' : 'Start an agent for this report'"
+        :data-testid="agentLive ? 'idr-agent-open' : 'idr-agent-start'"
+        @click.stop="agentClick"
+      >
+        <span class="row__agent-dot" />
+        {{ agentStarting ? 'Starting…' : (agentLive ? 'Agent' : 'Start agent') }}
+      </button>
+
       <i class="icon icon-chevron-right row__chevron" />
 
       <template v-if="confirming">
@@ -142,6 +174,47 @@ function remove() {
 </template>
 
 <style lang="scss" scoped>
+.row__agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover:not(:disabled) {
+    color: var(--body-text);
+    border-color: var(--link);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  &.is-live {
+    color: var(--success);
+    border-color: var(--success);
+  }
+}
+
+.row__agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+
+  .row__agent.is-live & {
+    background: var(--success);
+  }
+}
+
 .row {
   display: flex;
   align-items: stretch;

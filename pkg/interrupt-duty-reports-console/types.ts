@@ -132,6 +132,14 @@ export interface ReportMeta {
   finishedAt?: string;
   /** The conversation in the agent pod, so Stop has something to end. */
   session?: string;
+  /**
+   * When somebody last opened or started this report's agent.
+   *
+   * What keeps a conversation alive is being used, not being recent - so the cap evicts by
+   * this rather than by the report's date. Absent on every report written before the cap
+   * existed, which reads as "never touched" and falls back to startedAt.
+   */
+  agentTouchedAt?: string;
   /** Who pressed Generate. */
   startedBy?: string;
   headline?: string;

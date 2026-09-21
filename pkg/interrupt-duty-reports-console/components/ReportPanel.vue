@@ -59,6 +59,8 @@ const props = defineProps<{
   onDelete?: (meta: ReportMeta) => Promise<void> | void;
   /** Opening the conversation that wrote this report, while the agent pod still holds it. */
   onWatch?: (meta: ReportMeta) => void;
+  /** Whether this report has a live agent, so the session button is not a dead end. */
+  agentLive?: boolean;
 }>();
 
 const report = ref<Report | null>(null);
@@ -393,6 +395,40 @@ function recentRounds(h: IssueHistory) {
   return [...h.log].reverse().filter((e) => e.kind === 'report' || e.kind === 'failed').slice(0, 4);
 }
 
+/**
+ * A DOM id for an item, so "Act on these first" can point at the card itself.
+ *
+ * Derived from the reference rather than the index: the top three are chosen by the reporter
+ * and the sections are ordered by class, so position tells you nothing about where an item
+ * ended up. `#19072` and `SURE-12057` both become something an id may contain.
+ */
+function anchorFor(reference: string): string {
+  return `idr-item-${ String(reference).replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() }`;
+}
+
+/**
+ * Jump from the summary to the item.
+ *
+ * The three cards at the top say what to do first and then leave you to find it - in a report
+ * with thirty items, below several sections. The highlight is set inline rather than as a
+ * class because the card belongs to another component, and its scoped styles are not ours to
+ * reach into.
+ */
+function jumpTo(reference: string) {
+  const el = document.getElementById(anchorFor(reference));
+
+  if (!el) {
+    return;
+  }
+
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.style.transition = 'box-shadow 0.2s';
+  el.style.boxShadow = '0 0 0 2px var(--link)';
+  setTimeout(() => {
+    el.style.boxShadow = '';
+  }, 1600);
+}
+
 function chipsFor(section: { kind: string }, item: AnyItem) {
   if (section.kind === 'jira') {
     return jiraChips(item as JiraItem);
@@ -559,11 +595,18 @@ const asText = computed(() => {
             <li
               v-for="(top, index) in report.top3"
               :key="top.ref"
+              class="panel__top-item"
               :style="{ '--top-color': `var(${ classStyle(top.class).colorVar })` }"
+              role="button"
+              tabindex="0"
+              :title="`Go to ${ top.ref } in the report`"
+              @click="jumpTo(top.ref)"
+              @keydown.enter.prevent="jumpTo(top.ref)"
+              @keydown.space.prevent="jumpTo(top.ref)"
             >
               <span class="panel__top-rank">{{ index + 1 }}</span>
               <div class="panel__top-body">
-                <a :href="top.url" target="_blank" rel="noopener noreferrer" class="panel__top-ref">{{ top.ref }}</a>
+                <a :href="top.url" target="_blank" rel="noopener noreferrer" class="panel__top-ref" @click.stop>{{ top.ref }}</a>
                 <span v-if="top.meta" class="panel__top-meta">{{ top.meta }}</span>
                 <p class="panel__top-title">
                   {{ top.title }}
@@ -601,6 +644,7 @@ const asText = computed(() => {
             {{ section.note }}
           </p>
           <ItemCard
+            :id="anchorFor(itemRef(item))"
             v-for="item in section.items"
             :key="itemRef(item)"
             :reference="itemRef(item)"
@@ -713,8 +757,14 @@ const asText = computed(() => {
     <template #additional-actions>
       <template v-if="report">
         <CopyButton :text="asText" :label="activeClass === 'ALL' ? 'Copy whole report' : 'Copy what is shown'" />
+        <!--
+          Only when there is a conversation to open. A report outlives its agent - three alive
+          at once, a week at most - so for most reports this button used to open an empty chat
+          that looked like a bug. Starting one is offered from the row in the list, where the
+          state is visible before you click.
+        -->
         <RcButton
-          v-if="onWatch && meta.session"
+          v-if="onWatch && meta.session && agentLive"
           variant="secondary"
           size="large"
           data-testid="idr-panel-watch"
@@ -787,6 +837,15 @@ const asText = computed(() => {
 .panel__chat-note {
   color: var(--muted);
   font-size: 11px;
+}
+
+.panel__top-item {
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--accent-btn);
+  }
 }
 
 .panel__memory {
