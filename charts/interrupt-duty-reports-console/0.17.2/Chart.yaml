@@ -1,0 +1,20 @@
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/namespace: cattle-ui-plugin-system
+  catalog.cattle.io/os: linux
+  catalog.cattle.io/permits-os: linux, windows
+  catalog.cattle.io/scope: management
+  catalog.cattle.io/ui-component: plugins
+  catalog.cattle.io/display-name: Interrupt Duty Reports
+  catalog.cattle.io/rancher-version: '>= 2.10.0'
+  catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 5.0.0'
+apiVersion: v2
+appVersion: 0.17.2
+description: >-
+  The Rancher UI team's daily interrupt-duty report, generated in-cluster by the
+  Agents extension and kept as ConfigMaps
+name: interrupt-duty-reports-console
+type: application
+version: 0.17.2
+icon: https://marcelofukumoto.github.io/interrupt-duty-reports-console/icon.svg
+home: https://github.com/marcelofukumoto/interrupt-duty-reports-console
