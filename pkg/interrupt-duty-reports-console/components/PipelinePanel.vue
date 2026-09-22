@@ -73,6 +73,41 @@ function tick() {
   }, 4000);
 }
 
+/**
+ * The graph, laid out.
+ *
+ * Drawn rather than rendered by a diagram library on purpose. mermaid.js is a couple of
+ * megabytes even loaded lazily, and a general renderer cannot easily paint a node with THIS
+ * run's state - which is the point of the panel now. The shape is a spine, one fan-out and a
+ * store, so the arithmetic is small and the picture matches the rest of the design.
+ *
+ * Computed from PIPELINE, so it cannot drift from the text view beside it.
+ */
+const BOX_W = 148;
+const BOX_H = 34;
+const GAP = 20;
+const COL2 = 208;
+
+const layout = computed(() => {
+  const boxes = PIPELINE.map((stage, i) => ({
+    ...stage, x: 8, y: i * (BOX_H + GAP), w: BOX_W, h: BOX_H,
+  }));
+  const fan = boxes.find((b) => b.kind === 'fanout');
+
+  return {
+    boxes,
+    // Edges between consecutive stages; the one arriving at the fan-out is the per-item one.
+    edges: boxes.slice(0, -1).map((b, i) => ({
+      from: b, to: boxes[i + 1], dashed: boxes[i + 1].kind === 'fanout',
+    })),
+    store: fan ? {
+      x: COL2, y: fan.y, w: 136, h: BOX_H, row: fan,
+    } : null,
+    human: fan ? { x: COL2, y: fan.y + BOX_H + GAP, w: 136, h: BOX_H } : null,
+    height: boxes.length * (BOX_H + GAP),
+  };
+});
+
 function stageState(id: string): StageState {
   return state.value?.stages?.[id] || 'pending';
 }
@@ -142,6 +177,80 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
         {{ error }}
       </p>
     </header>
+
+    <!--
+      The picture, for the one thing the list cannot show: the store, and the two edges into it.
+      An agent reads and appends its own memory, and a person writing from a report card writes
+      to the same place - which is why what you say reaches tomorrow without touching today.
+    -->
+    <svg
+      class="pipe__svg"
+      :viewBox="`0 0 352 ${ layout.height }`"
+      role="img"
+      aria-label="The report pipeline as a graph"
+    >
+      <defs>
+        <marker id="pipe-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--border)" />
+        </marker>
+      </defs>
+
+      <g v-for="edge in layout.edges" :key="`e-${ edge.from.id }`">
+        <line
+          :x1="edge.from.x + BOX_W / 2" :y1="edge.from.y + BOX_H"
+          :x2="edge.to.x + BOX_W / 2" :y2="edge.to.y"
+          stroke="var(--border)" stroke-width="1.5"
+          :stroke-dasharray="edge.dashed ? '4 3' : undefined"
+          marker-end="url(#pipe-arrow)"
+        />
+        <text
+          v-if="edge.dashed"
+          :x="edge.from.x + BOX_W / 2 + 6" :y="edge.from.y + BOX_H + 13"
+          class="pipe__svg-edge"
+        >one per item</text>
+      </g>
+
+      <template v-if="layout.store">
+        <!-- agents read and append: one edge, both ways -->
+        <line
+          :x1="layout.store.row.x + BOX_W" :y1="layout.store.row.y + BOX_H / 2"
+          :x2="layout.store.x" :y2="layout.store.y + BOX_H / 2"
+          stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 3"
+          marker-end="url(#pipe-arrow)" marker-start="url(#pipe-arrow)"
+        />
+        <rect
+          :x="layout.store.x" :y="layout.store.y" :width="layout.store.w" :height="layout.store.h"
+          rx="17" class="pipe__svg-store"
+        />
+        <text :x="layout.store.x + layout.store.w / 2" :y="layout.store.y + 15" class="pipe__svg-label">store</text>
+        <text :x="layout.store.x + layout.store.w / 2" :y="layout.store.y + 27" class="pipe__svg-sub">a ConfigMap per issue</text>
+
+        <line
+          :x1="layout.human.x + layout.human.w / 2" :y1="layout.human.y"
+          :x2="layout.store.x + layout.store.w / 2" :y2="layout.store.y + BOX_H"
+          stroke="var(--border)" stroke-width="1.5" marker-end="url(#pipe-arrow)"
+        />
+        <rect
+          :x="layout.human.x" :y="layout.human.y" :width="layout.human.w" :height="layout.human.h"
+          rx="6" class="pipe__svg-human"
+        />
+        <text :x="layout.human.x + layout.human.w / 2" :y="layout.human.y + 15" class="pipe__svg-label">you</text>
+        <text :x="layout.human.x + layout.human.w / 2" :y="layout.human.y + 27" class="pipe__svg-sub">standing guidance</text>
+      </template>
+
+      <g v-for="box in layout.boxes" :key="box.id">
+        <rect
+          :x="box.x" :y="box.y" :width="box.w" :height="box.h" rx="6"
+          :class="['pipe__svg-box', painted ? `state-${ stageState(box.id) }` : '']"
+        />
+        <text :x="box.x + box.w / 2" :y="box.y + 21" class="pipe__svg-label">
+          {{ box.label }}
+          <tspan v-if="box.kind === 'fanout' && painted && state.counts.total" class="pipe__svg-sub">
+            {{ ` ${ state.counts.answered }/${ state.counts.total }` }}
+          </tspan>
+        </text>
+      </g>
+    </svg>
 
     <ol class="pipe__flow">
       <li
@@ -348,6 +457,64 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
 
 .pipe__stage.state-running > .pipe__bar .pipe__label {
   font-weight: 700;
+}
+
+.pipe__svg {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto 18px;
+  overflow: visible;
+}
+
+.pipe__svg-box {
+  fill: var(--body-bg);
+  stroke: var(--border);
+  stroke-width: 1.5;
+
+  &.state-done {
+    stroke: var(--success);
+  }
+
+  &.state-running {
+    stroke: var(--primary);
+    stroke-width: 2.5;
+  }
+
+  &.state-partial {
+    stroke: var(--warning);
+  }
+}
+
+.pipe__svg-store {
+  fill: var(--body-bg);
+  stroke: var(--primary);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.pipe__svg-human {
+  fill: var(--body-bg);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.pipe__svg-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-anchor: middle;
+  fill: var(--body-text);
+}
+
+.pipe__svg-sub,
+.pipe__svg-edge {
+  font-size: 9px;
+  font-weight: 400;
+  fill: var(--muted);
+}
+
+.pipe__svg-sub {
+  text-anchor: middle;
 }
 
 .pipe__flow {
