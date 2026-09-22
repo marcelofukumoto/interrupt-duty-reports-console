@@ -223,7 +223,9 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
       </button>
       <template v-if="showMermaid">
         <p class="pipe__hint">
-          Paste it anywhere that draws mermaid — a GitHub comment, or mermaid.live.
+          The list above is the pipeline; this is the same thing as a <em>graph</em>. Paste it
+          into a GitHub comment or mermaid.live to get it drawn with its edges — useful in a
+          pull request or a doc, not something you need here.
         </p>
         <pre class="pipe__code">{{ mermaid }}</pre>
         <CopyButton :text="mermaid" label="Copy the mermaid" />

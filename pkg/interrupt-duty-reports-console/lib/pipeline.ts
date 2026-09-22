@@ -14,6 +14,13 @@
 // This list is also the wider view: the graph covers the ROUND, while the reporter drives the
 // gather and writes and publishes the report around it.
 export interface Stage {
+  /**
+   * MUST match the node name in seed/round-graph.mjs.
+   *
+   * round-state.mjs reports a run's progress keyed by the graph's node names, so an id that
+   * drifts from the graph does not fail - the stage just shows "pending" forever on a finished
+   * run. It did: this said `classify` while the node was called `prepare`, for a day.
+   */
   id: string;
   label: string;
   /** What runs it - the file somebody would open to change it. */
@@ -33,7 +40,7 @@ export const PIPELINE: Stage[] = [
     output: 'data.json',
   },
   {
-    id: 'classify', label: 'classify', kind: 'code', runs: 'issue-round.sh',
+    id: 'prepare', label: 'classify', kind: 'code', runs: 'round-prepare.mjs',
     detail: 'ACT_NOW / FOLLOW_UP / WAITING / TRACKED, from a rule table applied once in code — not asked of an agent, so thirty of them cannot each drift.',
   },
   {
@@ -41,7 +48,7 @@ export const PIPELINE: Stage[] = [
     detail: 'One per item. Each reads its own history, is told only what changed, and appends what it concluded.',
   },
   {
-    id: 'collect', label: 'collect', kind: 'code', runs: 'issue-round.sh',
+    id: 'collect', label: 'collect', kind: 'code', runs: 'round-collect.mjs',
     detail: 'Every contribution, verbatim. The reporter does not rewrite these.',
     output: 'contributions.json',
   },
