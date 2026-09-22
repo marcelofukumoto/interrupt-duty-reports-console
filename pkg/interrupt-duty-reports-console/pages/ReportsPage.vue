@@ -18,6 +18,7 @@ import AgentSessionPanel from '../components/AgentSessionPanel.vue';
 import ButtonGroup from '@shell/components/ButtonGroup';
 import CalendarGrid from '../components/CalendarGrid.vue';
 import CredentialsDialog from '../components/CredentialsDialog.vue';
+import PipelinePanel from '../components/PipelinePanel.vue';
 import ReportPanel from '../components/ReportPanel.vue';
 import ReportRow from '../components/ReportRow.vue';
 import RunProgress from '../components/RunProgress.vue';
@@ -525,6 +526,27 @@ async function startAgentFor(meta: ReportMeta) {
 }
 
 /**
+ * Show what making a report actually does.
+ *
+ * Drawn from lib/pipeline.ts, not from the agent pod: the LangGraph spike there renders the
+ * same graph from its own code, which is a better source in principle and a bad dependency in
+ * practice - it is 77 MB of node_modules in a pod this extension does not own.
+ */
+function showPipeline() {
+  store.commit('slideInPanel/open', {
+    component:      PipelinePanel,
+    componentProps: {
+      width:              'wide',
+      height:             'full',
+      triggerFocusTrap:   true,
+      closeOnRouteChange: ['name', 'params', 'query'],
+      onClose:            () => store.commit('slideInPanel/close'),
+      meta:               reports.value[0],
+    },
+  });
+}
+
+/**
  * Show the run's conversation, in a drawer of our own.
  *
  * The same Rancher drawer the report opens in, holding the Agents extension's terminal. Driving
@@ -606,6 +628,16 @@ function open(meta: ReportMeta) {
         >
           <i class="icon icon-play" />
           <span>Generate report</span>
+        </button>
+        <button
+          type="button"
+          class="btn role-secondary"
+          data-testid="idr-pipeline"
+          title="What generating a report actually does"
+          @click="showPipeline"
+        >
+          <i class="icon icon-hierarchy" />
+          <span>Pipeline</span>
         </button>
         <button
           type="button"
