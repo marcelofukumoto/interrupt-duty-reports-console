@@ -91,25 +91,28 @@ for (const [group, arr] of Object.entries(d.jira || {})) {
   }
 }
 
-const only = process.env.ISSUE_ONLY;
-const chosen = only ? items.filter((i) => i.ref === only) : items;
-
-if (only && !chosen.length) {
-  process.stderr.write(`issue-round: --only ${ only } matched nothing; the board has: ${ items.map((i) => i.ref).join(", ") }\n`);
-  process.exit(2);
-}
+// ALWAYS the full list, even when the caller only wants one item asked.
+//
+// This used to write the FILTERED list, which quietly corrupted a retry: items.json shrank to
+// one entry, the target was renumbered to 000 - clobbering item zero's prompt - round-ask-one
+// then found 000.answer.json belonging to a DIFFERENT item and skipped it as already
+// answered, and collect rebuilt contributions.json from a one-item list, throwing away every
+// other answer in the report.
+//
+// The list and the prompt filenames are the run's index, so they must not depend on who is
+// asking. Narrowing belongs in the fan-out, which is where round-graph.mjs does it.
 
 // How many rounds each agent has already failed in a row, carried across to the asking pass -
 // it runs as its own process and would otherwise have to go back to the cluster for it.
-for (const it of chosen) {
+for (const it of items) {
   it.failures_before = (SEEN[it.ref] || {}).failures || 0;
 }
 
-fs.writeFileSync(`${ workDir }/items.json`, JSON.stringify(chosen));
+fs.writeFileSync(`${ workDir }/items.json`, JSON.stringify(items));
 
 // The prompt each agent gets. Its own item and nothing else: an agent that could see the
 // whole board would start reporting on items that are not its own.
-for (const [n, it] of chosen.entries()) {
+for (const [n, it] of items.entries()) {
   const seen = lastSeen(it.ref);
   const i = it.item;
   const comments = Array.isArray(i.comments) ? i.comments : [];
@@ -166,4 +169,4 @@ for (const [n, it] of chosen.entries()) {
   fs.writeFileSync(`${ workDir }/${ String(n).padStart(3, "0") }.prompt`, lines.join("\n"));
 }
 
-process.stderr.write(`issue-round: ${ chosen.length } item${ chosen.length === 1 ? "" : "s" }${ only ? ` (--only ${ only })` : "" }\n`);
+process.stderr.write(`issue-round: ${ items.length } item${ items.length === 1 ? "" : "s" } planned\n`);

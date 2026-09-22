@@ -71,7 +71,13 @@ async function prepare(s) {
     env: { ...process.env, KUBECONFIG: '/dev/null', ISSUE_ONLY: s.only || '', ISSUE_AGENT_CMD: AGENT },
   });
 
-  return { items: JSON.parse(fs.readFileSync(`${ s.workDir }/items.json`, 'utf8')) };
+  const items = JSON.parse(fs.readFileSync(`${ s.workDir }/items.json`, 'utf8'));
+
+  if (s.only && !items.some((it) => it.ref === s.only)) {
+    throw new Error(`--only ${ s.only } matched nothing; the board has: ${ items.map((it) => it.ref).join(', ') }`);
+  }
+
+  return { items };
 }
 
 /** One item, one fresh agent. The unit the graph fans out over. */
@@ -112,9 +118,14 @@ const graph = new StateGraph(State)
   .addEdge(START, 'gather')
   .addEdge('gather', 'prepare')
   // The fan-out. One Send per item, so N agents are N branches of one edge.
+  // Narrowing lives HERE, not in prepare. The item list and the prompt filenames are the
+  // run's index and must be the same whoever is asking; only which branches get sent changes.
   .addConditionalEdges(
     'prepare',
-    (s) => s.items.map((it, index) => new Send('issue_agent', { workDir: s.workDir, index, ref: it.ref })),
+    (s) => s.items
+      .map((it, index) => ({ it, index }))
+      .filter(({ it }) => !s.only || it.ref === s.only)
+      .map(({ it, index }) => new Send('issue_agent', { workDir: s.workDir, index, ref: it.ref })),
     ['issue_agent'],
   )
   .addEdge('issue_agent', 'collect')
