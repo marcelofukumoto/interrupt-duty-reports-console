@@ -5,10 +5,14 @@
 // it can be drawn, and drawn from the same list that describes it rather than by hand - a
 // hand-drawn picture is accurate exactly until somebody edits a script.
 //
-// Deliberately NOT read from the agent pod. A LangGraph spike there renders the same graph
-// from its own code, which is a better source in principle, but it is a spike: 77 MB of
-// node_modules in a pod this extension does not own, that anybody may delete. Shipped UI
-// should not depend on it.
+// Deliberately NOT read from the agent pod, even though the round is a LangGraph graph now and
+// `round-graph.mjs --draw` renders the same shape from the code that runs. That would be the
+// better source in principle and a bad dependency in practice: it needs node_modules in a pod
+// this extension does not own, and a panel that cannot draw itself when an install failed is
+// worse than one drawn from a list kept here.
+//
+// This list is also the wider view: the graph covers the ROUND, while the reporter drives the
+// gather and writes and publishes the report around it.
 export interface Stage {
   id: string;
   label: string;

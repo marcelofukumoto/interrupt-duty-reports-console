@@ -48,28 +48,32 @@ lives in the run directory and dies with the run.
 
 ## Regenerating this
 
-A LangGraph spike in the agents pod defines the same graph and renders it from the code, so it
-cannot drift the way a hand-drawn one does:
+The round **is** a LangGraph graph (`seed/round-graph.mjs`), so the picture comes from the code:
 
 ```sh
-cd /workspace/langgraph-spike && node graph.mjs --draw
+cd /workspace/.interrupt-duty && node round-graph.mjs --draw
 ```
 
-It is a **spike**, not part of the console — nothing imports it and nothing deploys it. It was
-built to answer whether expressing the pipeline as a graph buys anything. What it showed:
+The graph covers the **round** — `gather → prepare → issue_agent (one per item) → collect →
+prune`. The reporter drives it and then writes and publishes the report itself, which is why
+those two stages appear in the console's Pipeline view but not in the graph.
+
+What LangGraph is and is not doing here:
 
 | | |
 |---|---|
-| diagram generated from the code | yes |
-| fan-out with safe concurrent writes | yes, via a reducer |
-| resume across processes | yes, with a SQLite file — no server |
-| **partial fan-out recovery** | **yes — 6 of 7 agents kept, only the failed one re-run** |
-| live execution view | no (needs LangGraph Studio) |
-| tracing / cost | no (needs LangSmith + API-key calls) |
+| orchestrates the round as nodes and edges | yes |
+| fan-out, one branch per item, merged by a reducer | yes |
+| resumes a part-finished round without re-asking | yes — each answer is a file |
+| checkpoint of its own (`checkpoints.db` in the run dir) | yes, when the native sqlite module is available |
+| talks to a model | **no** — every node shells out to the same seed scripts |
+| needs an API key | **no** — the agents stay Claude Code on the subscription |
 
-The last row matters: the nodes shell out to Claude Code, so the agents stay on the
-subscription rather than becoming metered API calls — which is also why a tracing tool would
-see nothing useful.
+`graph-deps.sh` installs `@langchain/langgraph` beside the seed the first time a round runs:
+22 seconds from scratch, silent and instant afterwards. The sqlite checkpointer is optional
+because it is a native module and a rebuilt agent image may not have a toolchain — without it
+the graph still resumes, because the resumability lives in the answer files rather than in the
+checkpointer.
 
-The finding worth acting on is the bolded row. A round that dies on item six currently throws
-away five expensive calls, because `contributions.json` is written once at the end.
+**Still sequential.** The graph makes parallelism possible; a herd of claudes on the node that
+also runs Rancher has taken it down before, which has not changed.
