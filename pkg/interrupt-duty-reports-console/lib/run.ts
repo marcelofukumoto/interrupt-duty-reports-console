@@ -131,6 +131,7 @@ export async function writeSeed(target: PodRef): Promise<void> {
     'issue-round.sh', 'issue-agent.mjs', 'issue-brief.md', 'issue-prune.mjs',
     // The round is a graph now: its orchestration and the pieces it fans out over.
     'round-graph.mjs', 'round-prepare.mjs', 'round-ask-one.mjs', 'round-collect.mjs', 'graph-deps.sh',
+    'round-state.mjs', 'round-forget.mjs',
   ];
 
   for (const name of files) {
@@ -231,6 +232,99 @@ export async function startRun(principalId: string, startedBy?: string): Promise
     await setStatus(id, 'failed', why).catch(() => undefined);
 
     throw new Error(why, { cause: e });
+  }
+}
+
+/** One item in a run, and what became of its agent. */
+export interface RunItemState {
+  index: number;
+  ref: string;
+  cls: string | null;
+  kind: string | null;
+  answered: boolean;
+  ok: boolean | null;
+  verb?: string | null;
+  error?: string;
+  at?: string;
+}
+
+export type StageState = 'pending' | 'running' | 'done' | 'partial';
+
+export interface RunState {
+  runDir: string;
+  /**
+   * 'live' while the run is producing files, 'collected' once it finished, and 'gone' when the
+   * run directory has been cleaned down to meta.json - which is every report but the most
+   * recent, so it is the common case rather than an edge one.
+   */
+  detail: 'live' | 'collected' | 'gone';
+  stages: Record<string, StageState>;
+  items: RunItemState[];
+  counts: { answered: number; failed: number; total: number };
+}
+
+/**
+ * Where a run has got to.
+ *
+ * One pod call, answered by round-state.mjs from the files the run already wrote. The old
+ * progress was four phases inferred from file existence, and a report spent nearly all of its
+ * time in the middle one - which is the round: N agents, many minutes, nothing to see.
+ *
+ * Deliberately not read from the LangGraph checkpoint database. That is the richer source and
+ * it only exists when an optional native module installed, so a view built on it would be
+ * missing on some installs; the answer files are always there.
+ */
+export async function readRunState(meta: ReportMeta): Promise<RunState | null> {
+  const api = agentsApi();
+  const pod = api ? await api.agent.pod().catch(() => null) : null;
+
+  if (!pod) {
+    return null;
+  }
+
+  const result = await podExec(
+    agentTarget(pod),
+    ['node', `${ ROOT }/round-state.mjs`, `${ ROOT }/${ meta.id }`],
+    { timeoutMs: 20000 },
+  ).catch(() => null);
+
+  try {
+    return JSON.parse((result?.stdout || '').trim()) as RunState;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask one item's agent again, and only that one.
+ *
+ * Cheap for the first time: an answer is a file, so the other items are skipped rather than
+ * re-asked, and `--only` narrows the round to this one. The answer file has to go first or
+ * round-ask-one would skip the very item being retried.
+ *
+ * Launched DETACHED rather than awaited. A turn is minutes long, and holding an exec socket
+ * open for that is how a browser tab becomes load-bearing; the page is already polling, so it
+ * will see the answer appear.
+ */
+export async function retryItem(meta: ReportMeta, ref: string): Promise<void> {
+  const api = agentsApi();
+  const pod = await api?.agent.pod().catch(() => null);
+
+  if (!pod) {
+    throw new Error('The agent pod is not running, so there is nothing to retry in.');
+  }
+
+  const runDir = `${ ROOT }/${ meta.id }`;
+  const script = [
+    `node ${ shellQuote(`${ ROOT }/round-forget.mjs`) } ${ shellQuote(runDir) } ${ shellQuote(ref) }`,
+    `nohup sh ${ shellQuote(`${ ROOT }/issue-round.sh`) } ${ shellQuote(runDir) } --only ${ shellQuote(ref) } >> ${ shellQuote(`${ runDir }/retry.log`) } 2>&1 &`,
+    'echo started',
+  ].join('\n');
+
+  const result = await podExec(agentTarget(pod), ['/bin/sh', '-c', script], { timeoutMs: 30000 });
+
+  if (!(result.stdout || '').includes('started')) {
+    throw new Error((result.stderr || '').trim() || 'The retry did not start.');
   }
 }
 

@@ -532,7 +532,7 @@ async function startAgentFor(meta: ReportMeta) {
  * same graph from its own code, which is a better source in principle and a bad dependency in
  * practice - it is 77 MB of node_modules in a pod this extension does not own.
  */
-function showPipeline() {
+function showPipeline(forReport?: ReportMeta) {
   store.commit('slideInPanel/open', {
     component:      PipelinePanel,
     componentProps: {
@@ -541,7 +541,9 @@ function showPipeline() {
       triggerFocusTrap:   true,
       closeOnRouteChange: ['name', 'params', 'query'],
       onClose:            () => store.commit('slideInPanel/close'),
-      meta:               reports.value[0],
+      // The run in flight if there is one, else the newest report - the two things somebody
+      // opening this is likely to be asking about.
+      meta:               forReport || activeRun.value || reports.value[0],
     },
   });
 }
@@ -596,6 +598,7 @@ function open(meta: ReportMeta) {
       previousDate: previous?.reportDate,
       onDelete:     remove,
       onWatch:      (value: ReportMeta) => watchSession(value, true),
+      onPipeline:   () => showPipeline(meta),
       // A run in flight always has a conversation - it is the one doing the work - and it is
       // deliberately outside the cap, so it never appears in liveAgentIds.
       agentLive:    meta.status === 'running' || liveAgentIds.value.has(meta.id),
@@ -634,7 +637,7 @@ function open(meta: ReportMeta) {
           class="btn role-secondary"
           data-testid="idr-pipeline"
           title="What generating a report actually does"
-          @click="showPipeline"
+          @click="showPipeline()"
         >
           <i class="icon icon-hierarchy" />
           <span>Pipeline</span>

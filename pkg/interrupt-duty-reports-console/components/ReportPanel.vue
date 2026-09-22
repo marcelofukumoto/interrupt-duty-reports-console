@@ -61,6 +61,8 @@ const props = defineProps<{
   onWatch?: (meta: ReportMeta) => void;
   /** Whether this report has a live agent, so the session button is not a dead end. */
   agentLive?: boolean;
+  /** Show how this report was made, and where each of its agents got to. */
+  onPipeline?: () => void;
 }>();
 
 const report = ref<Report | null>(null);
@@ -757,6 +759,15 @@ const asText = computed(() => {
     <template #additional-actions>
       <template v-if="report">
         <CopyButton :text="asText" :label="activeClass === 'ALL' ? 'Copy whole report' : 'Copy what is shown'" />
+        <RcButton
+          v-if="onPipeline"
+          variant="secondary"
+          size="large"
+          data-testid="idr-panel-pipeline"
+          @click="onPipeline()"
+        >
+          How it was made
+        </RcButton>
         <!--
           Only when there is a conversation to open. A report outlives its agent - three alive
           at once, a week at most - so for most reports this button used to open an empty chat
