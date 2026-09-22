@@ -87,15 +87,51 @@ const BOX_W = 148;
 const BOX_H = 34;
 const GAP = 20;
 const COL2 = 208;
+/** One square per agent, and how many fit on a line before it wraps. */
+const SQ = 11;
+const SQ_GAP = 3;
+const SQ_PER_ROW = 9;
 
 const layout = computed(() => {
-  const boxes = PIPELINE.map((stage, i) => ({
-    ...stage, x: 8, y: i * (BOX_H + GAP), w: BOX_W, h: BOX_H,
-  }));
+  /**
+   * The fan-out is drawn as ONE box carrying a square per agent, not as N boxes.
+   *
+   * One plain box was what LangGraph's own renderer can manage - it models the fan-out as a
+   * Send to a single node, N times - and it hid the only interesting thing, which is how many
+   * there are and which of them answered. Drawing every branch was the other extreme: legible
+   * at eight, six hundred pixels of pills at thirty, and it printed the same references the
+   * list below already prints.
+   *
+   * So: layers behind the box to say "many", a count, and a square per agent for the state.
+   * The list underneath keeps the detail. The picture says shape and state; the list says what
+   * each one decided.
+   */
+  const count = state.value?.items?.length || 0;
+  const sqRows = count ? Math.ceil(count / SQ_PER_ROW) : 0;
+  const fanH = sqRows ? 28 + sqRows * (SQ + SQ_GAP) + 10 : BOX_H;
+
+  let y = 0;
+  const boxes = PIPELINE.map((stage) => {
+    const h = stage.kind === 'fanout' ? fanH : BOX_H;
+    const box = {
+      ...stage, x: 8, y, w: BOX_W, h,
+    };
+
+    y += h + GAP;
+
+    return box;
+  });
+
   const fan = boxes.find((b) => b.kind === 'fanout');
+  const squares = (state.value?.items || []).map((item, i) => ({
+    item,
+    x: 18 + (i % SQ_PER_ROW) * (SQ + SQ_GAP),
+    y: (fan?.y || 0) + 28 + Math.floor(i / SQ_PER_ROW) * (SQ + SQ_GAP),
+  }));
 
   return {
     boxes,
+    squares,
     // Edges between consecutive stages; the one arriving at the fan-out is the per-item one.
     edges: boxes.slice(0, -1).map((b, i) => ({
       from: b, to: boxes[i + 1], dashed: boxes[i + 1].kind === 'fanout',
@@ -103,10 +139,41 @@ const layout = computed(() => {
     store: fan ? {
       x: COL2, y: fan.y, w: 136, h: BOX_H, row: fan,
     } : null,
-    human: fan ? { x: COL2, y: fan.y + BOX_H + GAP, w: 136, h: BOX_H } : null,
-    height: boxes.length * (BOX_H + GAP),
+    human: fan ? { x: COL2, y: fan.y + fan.h + GAP - BOX_H, w: 136, h: BOX_H } : null,
+    height: y,
   };
 });
+
+/** Which colour class a square wears: answered, failed, or not asked yet. */
+function squareClass(item: RunItemState): string {
+  return item.answered ? (item.ok ? 'is-ok' : 'is-failed') : 'is-waiting';
+}
+
+/** A DOM id for one item's line in the list below, so a square can point at it. */
+function itemAnchor(ref: string): string {
+  return `pipe-item-${ String(ref).replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase() }`;
+}
+
+/**
+ * Click a square, land on that agent's line.
+ *
+ * The compact view is a way INTO the detail rather than a summary of it - the same move the
+ * "Act on these first" cards make in a report.
+ */
+function jumpToItem(ref: string) {
+  const el = document.getElementById(itemAnchor(ref));
+
+  if (!el) {
+    return;
+  }
+
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.style.transition = 'background 0.2s';
+  el.style.background = 'var(--accent-btn)';
+  setTimeout(() => {
+    el.style.background = '';
+  }, 1400);
+}
 
 function stageState(id: string): StageState {
   return state.value?.stages?.[id] || 'pending';
@@ -239,16 +306,39 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
       </template>
 
       <g v-for="box in layout.boxes" :key="box.id">
+        <!-- Layers behind the fan-out, to say "many" without drawing every branch. -->
+        <template v-if="box.kind === 'fanout' && layout.squares.length">
+          <rect :x="box.x + 10" :y="box.y + 7" :width="box.w" :height="box.h" rx="6" class="pipe__svg-layer" />
+          <rect :x="box.x + 5" :y="box.y + 3.5" :width="box.w" :height="box.h" rx="6" class="pipe__svg-layer" />
+        </template>
+
         <rect
           :x="box.x" :y="box.y" :width="box.w" :height="box.h" rx="6"
           :class="['pipe__svg-box', painted ? `state-${ stageState(box.id) }` : '']"
         />
-        <text :x="box.x + box.w / 2" :y="box.y + 21" class="pipe__svg-label">
-          {{ box.label }}
-          <tspan v-if="box.kind === 'fanout' && painted && state.counts.total" class="pipe__svg-sub">
-            {{ ` ${ state.counts.answered }/${ state.counts.total }` }}
-          </tspan>
-        </text>
+
+        <!-- The fan-out names itself on the left, so the count can sit on the right. -->
+        <template v-if="box.kind === 'fanout' && layout.squares.length">
+          <text :x="box.x + 10" :y="box.y + 18" class="pipe__svg-label is-left">{{ box.label }}</text>
+          <text :x="box.x + box.w - 10" :y="box.y + 18" class="pipe__svg-count">
+            {{ state.counts.answered }} / {{ state.counts.total }}
+          </text>
+        </template>
+        <text v-else :x="box.x + box.w / 2" :y="box.y + 21" class="pipe__svg-label">{{ box.label }}</text>
+      </g>
+
+      <!--
+        One square per agent: green answered, red failed, hollow not asked yet. Click one and
+        it lands on that agent's line in the list below.
+      -->
+      <g v-for="sq in layout.squares" :key="`sq-${ sq.item.ref }`">
+        <rect
+          :x="sq.x" :y="sq.y" :width="SQ" :height="SQ" rx="2.5"
+          :class="['pipe__svg-sq', squareClass(sq.item)]"
+          @click="jumpToItem(sq.item.ref)"
+        >
+          <title>{{ sq.item.ref }} — {{ sq.item.answered ? (sq.item.ok ? (sq.item.verb || 'answered') : 'failed') : 'not asked yet' }}</title>
+        </rect>
       </g>
     </svg>
 
@@ -292,7 +382,12 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
           the one the old four-phase progress could only call "analysing".
         -->
         <ul v-if="stage.kind === 'fanout' && items.length" class="pipe__items">
-          <li v-for="item in items" :key="item.ref" :class="['pipe__item', item.answered ? (item.ok ? 'is-ok' : 'is-failed') : 'is-waiting']">
+          <li
+            v-for="item in items"
+            :id="itemAnchor(item.ref)"
+            :key="item.ref"
+            :class="['pipe__item', item.answered ? (item.ok ? 'is-ok' : 'is-failed') : 'is-waiting']"
+          >
             <span class="pipe__item-ref">{{ item.ref }}</span>
             <span v-if="item.cls" class="pipe__item-cls">{{ item.cls }}</span>
             <span class="pipe__item-said">
@@ -499,11 +594,52 @@ const itemCount = computed(() => state.value?.counts?.total || 0);
   stroke-width: 1.5;
 }
 
+.pipe__svg-layer {
+  fill: var(--body-bg);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.pipe__svg-sq {
+  cursor: pointer;
+  stroke-width: 1.2;
+
+  &.is-ok {
+    fill: var(--success);
+    stroke: var(--success);
+  }
+
+  &.is-failed {
+    fill: var(--error);
+    stroke: var(--error);
+  }
+
+  &.is-waiting {
+    fill: var(--body-bg);
+    stroke: var(--border);
+  }
+
+  &:hover {
+    stroke: var(--link);
+    stroke-width: 2;
+  }
+}
+
+.pipe__svg-count {
+  font-size: 9px;
+  fill: var(--muted);
+  text-anchor: end;
+}
+
 .pipe__svg-label {
   font-size: 12px;
   font-weight: 600;
   text-anchor: middle;
   fill: var(--body-text);
+
+  &.is-left {
+    text-anchor: start;
+  }
 }
 
 .pipe__svg-sub,
