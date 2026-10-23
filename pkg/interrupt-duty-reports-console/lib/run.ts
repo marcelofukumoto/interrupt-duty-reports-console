@@ -329,6 +329,71 @@ export async function retryItem(meta: ReportMeta, ref: string): Promise<void> {
 }
 
 /**
+ * Kill every process working on one run directory, and everything those processes started.
+ *
+ * Ending the conversation is not enough on its own. The gather and the round are started by
+ * claude's shell, and the round starts a fresh claude per item - none of which carries the run
+ * directory on its command line, and none of which dies with the tmux session. So the roots are
+ * found by the run directory in their arguments (run.sh, issue-round.sh, round-graph.mjs), and
+ * the rest by walking parent ids down from them.
+ *
+ * Node rather than pkill: the agent pod is stock node:24, and /proc is all this needs.
+ */
+const KILL_RUN_TREE = `
+const fs = require('fs');
+const dir = process.argv[1];
+const procs = [];
+for (const pid of fs.readdirSync('/proc')) {
+  if (!/^\\d+$/.test(pid) || +pid === process.pid) continue;
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const ppid = +stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1];
+    const args = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\\0');
+    procs.push({ pid: +pid, ppid, hit: args.some((a) => a === dir || a.startsWith(dir + '/')) });
+  } catch (e) {}
+}
+const doomed = new Set(procs.filter((p) => p.hit).map((p) => p.pid));
+for (let grew = true; grew;) {
+  grew = false;
+  for (const p of procs) {
+    if (!doomed.has(p.pid) && doomed.has(p.ppid)) { doomed.add(p.pid); grew = true; }
+  }
+}
+const kill = (sig) => doomed.forEach((pid) => { try { process.kill(pid, sig); } catch (e) {} });
+kill('SIGTERM');
+setTimeout(() => { kill('SIGKILL'); console.log('__IDR_STOPPED__ ' + doomed.size); }, 2000);
+`;
+
+/**
+ * Stop a run that is in flight.
+ *
+ * The conversation first, so its claude cannot start another step while the processes it already
+ * started are being killed; then those processes; then the summary, which is what the page and
+ * every other tab read. The summary is marked whatever happened in the pod - a run whose pod has
+ * gone is still a run somebody asked to stop, and a row left saying "running" is the bug this
+ * exists to fix.
+ */
+export async function stopRun(meta: ReportMeta): Promise<void> {
+  const api = agentsApi();
+
+  if (api && meta.session) {
+    await api.agent.end(meta.session).catch(() => undefined);
+  }
+
+  const pod = await api?.agent.pod().catch(() => null);
+
+  if (pod) {
+    await podExec(
+      agentTarget(pod),
+      ['node', '-e', KILL_RUN_TREE, `${ ROOT }/${ meta.id }`],
+      { timeoutMs: 20000 },
+    ).catch(() => undefined);
+  }
+
+  await setStatus(meta.id, 'cancelled', 'Stopped from the reports page.');
+}
+
+/**
  * How many report agents may be alive at once.
  *
  * A report agent is one claude in the pod, measured at ~270 MiB - trivial on its own and not
